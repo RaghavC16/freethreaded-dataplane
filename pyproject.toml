@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nogil-data-plane"
+version = "0.2.0"
+description = "An RPC-backed BatchedDomainList actor for distributed alpha-beta-CROWN"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = ["nogil-rpc>=0.2.0", "torch>=2.1"]
+
+[tool.setuptools]
+packages = ["nogil_data_plane"]
+
+[tool.setuptools.package-data]
+nogil_data_plane = ["py.typed"]
