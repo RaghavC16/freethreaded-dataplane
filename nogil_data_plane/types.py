@@ -63,6 +63,77 @@ class SharedDomainListState:
         return result
 
 @dataclass(frozen=True)
+class SharedDomainListSnapshot:
+    """Atomic shared-frontier observation; it is not global termination."""
+    job_id: str
+    version: int
+    pending_shared_domains: int
+    checked_out_shared_batches: int
+    shared_idle: bool
+    failed: bool
+    failure_reason: str | None
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "SharedDomainListSnapshot":
+        state = SharedDomainListState.from_dict(value)
+        job_id, version = value.get("job_id"), value.get("version")
+        if not isinstance(job_id, str) or not job_id or type(version) is not int or version < 0:
+            raise ValueError("invalid shared-domain-list snapshot identity")
+        return cls(job_id, version, state.pending_shared_domains,
+                   state.checked_out_shared_batches, state.shared_idle,
+                   state.failed, state.failure_reason)
+
+    def to_dict(self) -> dict[str, Any]:
+        return self.__dict__.copy()
+
+@dataclass(frozen=True)
+class DomainRecord:
+    lower_bound: Any
+    upper_bound: Any
+    threshold: Any
+    history: Any
+    split_history: Any
+    depth: Any
+
+    @classmethod
+    def from_value(cls, value: Any) -> "DomainRecord":
+        if isinstance(value, dict):
+            source = value
+            get = source.__getitem__
+        else:
+            get = lambda name: getattr(value, name)
+        try:
+            return cls(*(get(name) for name in (
+                "lower_bound", "upper_bound", "threshold", "history",
+                "split_history", "depth")))
+        except (KeyError, AttributeError) as exc:
+            raise ValueError("invalid domain query record") from exc
+
+    def to_dict(self) -> dict[str, Any]:
+        return self.__dict__.copy()
+
+@dataclass(frozen=True)
+class InputDomainListSnapshot:
+    shared: SharedDomainListSnapshot
+    output_device: Any = None
+    storage_depth: int | None = None
+    use_alpha: bool | None = None
+    sort_index: int | None = None
+    sort_descending: bool | None = None
+    use_split_idx: bool | None = None
+    spec_size: Any = None
+    volume: Any = None
+    all_volume: Any = None
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "InputDomainListSnapshot":
+        shared = SharedDomainListSnapshot.from_dict(value)
+        return cls(shared, *(value.get(name) for name in (
+            "output_device", "storage_depth", "use_alpha", "sort_index",
+            "sort_descending", "use_split_idx", "spec_size", "volume",
+            "all_volume")))
+
+@dataclass(frozen=True)
 class PickOutResult:
     status: Literal["data", "empty"]
     domains: dict | None

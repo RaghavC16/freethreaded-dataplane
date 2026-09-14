@@ -10,7 +10,8 @@ from nogil_rpc import ActorHandle, RemoteProcess, RpcRuntime, connect
 
 from .domain_packet_codec import DomainPacketCodec
 from .rpc_serializer import DomainRpcSerializer
-from .types import SharedDomainListEndpoint, SharedDomainListState
+from .types import (SharedDomainListEndpoint, SharedDomainListSnapshot,
+                    SharedDomainListState)
 
 
 class BatchedDomainListActorServer:
@@ -78,6 +79,7 @@ class BatchedDomainListActorServer:
                 f"{connect_host}:{bound_port}",
                 serializer=DomainRpcSerializer(self.codec),
                 timeout=self.request_timeout,
+                submission_timeout=self.request_timeout,
                 max_frame_size=self.max_frame_size,
             )
             owner_actor = owner_process.BatchedDomainListActor.remote(
@@ -122,6 +124,10 @@ class BatchedDomainListActorServer:
     def mark_failed(self, reason: str) -> SharedDomainListState:
         value = self._actor().fail.remote(reason).get(timeout=self.request_timeout)
         return SharedDomainListState.from_dict(value)
+
+    def snapshot(self) -> SharedDomainListSnapshot:
+        value = self._actor().snapshot.remote().get(timeout=self.request_timeout)
+        return SharedDomainListSnapshot.from_dict(value)
 
     def worker_failed(self, worker_id: str, reason: str) -> SharedDomainListState:
         response = self._actor().worker_failed.remote(

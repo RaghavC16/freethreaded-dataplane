@@ -17,7 +17,8 @@ from .errors import (
     RemoteDataPlaneError,
 )
 from .rpc_serializer import DomainRpcSerializer
-from .types import SharedDomainListEndpoint, SharedDomainListState
+from .types import (DomainRecord, SharedDomainListEndpoint,
+                    SharedDomainListSnapshot, SharedDomainListState)
 
 
 class RpcBatchedDomainList:
@@ -33,6 +34,7 @@ class RpcBatchedDomainList:
         codec: DomainPacketCodec | None = None,
         connect_timeout: float = 30.0,
         request_timeout: float = 300.0,
+        submission_timeout: float | None = None,
     ) -> None:
         if not isinstance(worker_id, str) or not worker_id:
             raise ValueError("worker_id must not be empty")
@@ -44,6 +46,7 @@ class RpcBatchedDomainList:
         self._request_timeout = request_timeout
         self._lock = threading.Lock()
         self._has_checked_out_batch = False
+        self._checkout: str | None = None
         self._closed = False
         self._broken = False
         process: RemoteProcess | None = None
@@ -53,6 +56,8 @@ class RpcBatchedDomainList:
                 endpoint.address,
                 serializer=DomainRpcSerializer(self._codec),
                 timeout=connect_timeout,
+                submission_timeout=(request_timeout if submission_timeout is None
+                                    else submission_timeout),
                 max_frame_size=endpoint.max_frame_size,
             )
             actor = process.attach_actor(endpoint.actor_id)
@@ -119,6 +124,11 @@ class RpcBatchedDomainList:
                 self._broken = True
                 raise ProtocolError("pick_out domains must be a dictionary")
             self._has_checked_out_batch = True
+            checkout = response.get("checkout")
+            if not isinstance(checkout, str) or not checkout:
+                self._broken = True
+                raise ProtocolError("pick_out checkout identity is missing")
+            self._checkout = checkout
             target = self._device if device is None else device
             return self._codec.map_tensors(domains, lambda tensor: tensor.to(target))
 
@@ -142,25 +152,93 @@ class RpcBatchedDomainList:
                 "ok",
             )
             self._has_checked_out_batch = False
+            self._checkout = None
             return self._codec.map_tensors(
                 response.get("global_lb"),
                 lambda tensor: tensor.to(self._device),
             )
 
-    def complete_pick_to_local(self) -> None:
+    def complete_pick_to_local(self, checkout: str | None = None) -> None:
         with self._lock:
             if not self._has_checked_out_batch:
                 raise InvalidStateError("no shared pick_out is active")
+            token = self._checkout if checkout is None else checkout
+            if token != self._checkout:
+                raise InvalidStateError("checkout is stale or not active")
             self._require_response(
-                self._call("complete_pick_to_local", self.worker_id),
+                self._call("complete_pick_to_local", self.worker_id,
+                           token),
                 "ok",
             )
             self._has_checked_out_batch = False
+            self._checkout = None
+
+    @property
+    def checkout_id(self) -> str | None:
+        with self._lock:
+            return self._checkout
+
+    def publish_children(self, checkout: str, bounds: dict, d: dict,
+                         check_infeasibility: bool) -> Any:
+        with self._lock:
+            if checkout != self._checkout:
+                raise InvalidStateError("checkout is stale or not active")
+            response = self._require_response(self._call(
+                "publish_children", self.worker_id, checkout, bounds, d,
+                check_infeasibility), "ok")
+            self._has_checked_out_batch = False
+            self._checkout = None
+            return self._codec.map_tensors(
+                response.get("global_lb"), lambda tensor: tensor.to(self._device))
+
+    def complete_pruned(self, checkout: str | None = None) -> None:
+        with self._lock:
+            token = self._checkout if checkout is None else checkout
+            if token is None or token != self._checkout:
+                raise InvalidStateError("checkout is stale or not active")
+            self._require_response(
+                self._call("complete_pruned", self.worker_id, token), "ok")
+            self._has_checked_out_batch = False
+            self._checkout = None
+
+    def donate(self, bounds: dict, d: dict, check_infeasibility: bool) -> Any:
+        with self._lock:
+            if self._checkout is not None:
+                raise InvalidStateError("donation is forbidden during a checkout")
+            response = self._require_response(self._call(
+                "donate", self.worker_id, bounds, d, check_infeasibility), "ok")
+            return self._codec.map_tensors(
+                response.get("global_lb"), lambda tensor: tensor.to(self._device))
 
     def state(self) -> SharedDomainListState:
         with self._lock:
             value = self._call("state")
             return SharedDomainListState.from_dict(value)
+
+    def snapshot(self) -> SharedDomainListSnapshot:
+        with self._lock:
+            return SharedDomainListSnapshot.from_dict(self._call("snapshot"))
+
+    def sort(self) -> None:
+        with self._lock:
+            self._require_response(self._call("sort"), "ok")
+
+    def get_min_domain(self, num: int, rev_order: bool = False) -> list[DomainRecord]:
+        with self._lock:
+            response = self._call("get_min_domain", num, rev_order)
+            if not isinstance(response, dict) or not isinstance(response.get("records"), list):
+                raise ProtocolError("malformed domain query response")
+            return [DomainRecord.from_value(x) for x in response["records"]]
+
+    def get_item(self, index: int, *, version: int | None = None) -> DomainRecord:
+        with self._lock:
+            response = self._call("get_item", index, version)
+            if not isinstance(response, dict) or "record" not in response:
+                raise ProtocolError("malformed domain item response")
+            return DomainRecord.from_value(response["record"])
+
+    def __getitem__(self, index: int) -> DomainRecord:
+        return self.get_item(index)
 
     def worker_failed(self, reason: str) -> SharedDomainListState:
         with self._lock:

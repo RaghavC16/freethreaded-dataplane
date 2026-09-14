@@ -18,6 +18,32 @@ actor must be paired with exactly one shared `add()` or, after its children are
 committed locally and reported to the control plane,
 `complete_pick_to_local()`.
 
+Strict consumers use the opaque `checkout_id` returned by a successful pick.
+`publish_children`, `complete_pick_to_local`, or `complete_pruned` terminates
+that exact checkout; `donate` publishes local-parent children and is rejected
+while shared work is checked out. Stale, foreign, and duplicate tokens fail
+before mutation. Compatibility `add` retains its existing behavior.
+
+`snapshot()` atomically returns job identity, a monotonic version, shared
+pending/checkout counts, and sticky failure state. `shared_idle` describes only
+the actor and cannot establish global termination. Activation queries provide
+sorting, minimum-domain records, and detached indexed records. The inspected
+storage ignores `rev_order`, so `rev_order=True` is explicitly unsupported.
+
+`RpcInputDomainList` and `InputDomainListActorServer` apply the checkout
+protocol to both input-list variants while preserving the nine-field pick
+tuple, keyword `add`, sorting, top-k/index queries, `get_progess`, and the
+corrected `get_progress` alias.
+
+| Optional activation capability | Status |
+|---|---|
+| `drop_lAs` | unsupported |
+| clipping objective initialization | unsupported |
+| `update_unstable_mask` | unsupported |
+| shared counts/failure metadata | supported by `snapshot()` |
+
+Unsupported mutation methods are absent and fail before storage changes.
+
 ## Minimal use
 
 ```python
