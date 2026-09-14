@@ -86,6 +86,16 @@ class InputDomainListActor:
         if worker_id in self._checkouts and self._failure is None: self._failure = "worker closed with checked-out input domains"
         self._workers.discard(worker_id); self._version += 1
         return {"status": "ok", "state": self._snapshot()}
+    def worker_failed(self, worker_id, reason):
+        self._worker(worker_id)
+        if worker_id in self._checkouts and self._failure is None:
+            self._failure = f"worker {worker_id} failed with checked-out input domains: {reason}"[:1000]
+        self._workers.discard(worker_id); self._version += 1
+        return {"status": "ok", "state": self._snapshot()}
+    def fail(self, reason):
+        if self._failure is None:
+            self._failure = str(reason)[:1000]; self._version += 1
+        return self._snapshot()
 
 class RpcInputDomainList:
     """Synchronous facade preserving the input storage APIs and pick tuple."""
@@ -94,11 +104,13 @@ class RpcInputDomainList:
         self.endpoint, self.worker_id, self._device = endpoint, worker_id, device
         self._codec, self._timeout = codec or DomainPacketCodec(), request_timeout
         self._lock, self._checkout, self._closed = threading.Lock(), None, False
+        self._registered = False
         self._process = connect(endpoint.address, serializer=DomainRpcSerializer(self._codec),
             timeout=connect_timeout, submission_timeout=request_timeout, max_frame_size=endpoint.max_frame_size)
         self._actor = self._process.attach_actor(endpoint.actor_id)
         response = self._actor.register_worker.remote(worker_id, endpoint.job_id).get(request_timeout)
         if not isinstance(response, dict) or response.get("status") != "ok": raise ProtocolError("malformed registration")
+        self._registered = True
     def _call(self, name, *args):
         if self._closed: raise ActorFailedError("input facade is closed")
         return getattr(self._actor, name).remote(*args).get(self._timeout)
@@ -144,10 +156,36 @@ class RpcInputDomainList:
         with self._lock: return InputDomainListSnapshot.from_dict(self._call("snapshot"))
     def state(self): return self.snapshot()
     def __len__(self): return self.snapshot().shared.pending_shared_domains
+    @property
+    def output_device(self): return self.snapshot().output_device or self._device
+    @property
+    def storage_depth(self): return self.snapshot().storage_depth
+    @property
+    def use_alpha(self): return bool(self.snapshot().use_alpha)
+    @property
+    def sort_index(self): return self.snapshot().sort_index
+    @property
+    def sort_descending(self): return self.snapshot().sort_descending
+    @property
+    def use_split_idx(self): return bool(self.snapshot().use_split_idx)
+    @property
+    def spec_size(self): return self.snapshot().spec_size
+    @property
+    def volume(self): return self.snapshot().volume
+    @property
+    def all_volume(self): return self.snapshot().all_volume
+    def worker_failed(self, reason):
+        with self._lock:
+            response = self._call("worker_failed", self.worker_id, reason)
+            self._registered = False
+            self._checkout = None
+            return InputDomainListSnapshot.from_dict(response["state"])
     def close(self):
         with self._lock:
             if self._closed: return
-            try: self._call("close_worker", self.worker_id)
+            try:
+                if self._registered:
+                    self._call("close_worker", self.worker_id)
             finally: self._closed = True; self._actor.close(); self._process.close()
 
 class InputDomainListActorServer:
@@ -163,6 +201,14 @@ class InputDomainListActorServer:
         payload = self.domains.to_bytes() if callable(getattr(self.domains, "to_bytes", None)) else pickle.dumps(self.domains)
         self.actor = self.process.InputDomainListActor.remote(payload, self.job_id)
         return SharedDomainListEndpoint(host, port, self.actor.actor_id, self.job_id, self.max_frame_size)
+    def state(self):
+        if self.actor is None: raise RuntimeError("input actor server is not started")
+        return InputDomainListSnapshot.from_dict(
+            self.actor.snapshot.remote().get(self.timeout))
+    def mark_failed(self, reason):
+        if self.actor is None: raise RuntimeError("input actor server is not started")
+        return InputDomainListSnapshot.from_dict(
+            self.actor.fail.remote(reason).get(self.timeout))
     def stop(self):
         if self.actor is not None: self.actor.close()
         if self.process is not None: self.process.close()

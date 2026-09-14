@@ -9,7 +9,9 @@ import torch
 from nogil_data_plane import (
     BatchedDomainListActorServer,
     DomainPacketCodec,
+    InputDomainListActorServer,
     RpcBatchedDomainList,
+    RpcInputDomainList,
 )
 
 
@@ -118,6 +120,81 @@ class EndToEndTests(unittest.TestCase):
         client.pick_out(1)
         client.close()
         self.assertTrue(self.server.state().failed)
+
+
+class FakeInputDomainList:
+    output_device = "cpu"
+    storage_depth = 7
+    use_alpha = True
+    sort_index = 2
+    sort_descending = True
+    use_split_idx = False
+    spec_size = 3
+    volume = 4.0
+    all_volume = 8.0
+
+    def __init__(self):
+        self.values = [1, 2]
+
+    def __len__(self):
+        return len(self.values)
+
+    def pick_out_batch(self, batch, device):
+        selected, self.values = self.values[:batch], self.values[batch:]
+        value = torch.tensor(selected, device=device)
+        return ({}, value, value, value + 1, value, value, None, value, value)
+
+    def add(self, lower_bound, *args, **kwargs):
+        self.values.extend(lower_bound.tolist())
+
+    def sort(self):
+        self.values.sort()
+
+    def get_topk_indices(self, k=1, largest=False, return_margin=False):
+        indices = torch.arange(k)
+        return (indices, indices.float()) if return_margin else indices
+
+    def get_progess(self):
+        return 0.5
+
+    def __getitem__(self, index):
+        return self.values[index]
+
+
+class InputEndToEndTests(unittest.TestCase):
+    def setUp(self):
+        self.server = InputDomainListActorServer(
+            FakeInputDomainList(), "input-e2e", request_timeout=5,
+            max_frame_size=16 * 1024 * 1024)
+        self.endpoint = self.server.start()
+        self.client = RpcInputDomainList(
+            self.endpoint, worker_id="input-worker", request_timeout=5)
+
+    def tearDown(self):
+        self.client.close()
+        self.server.stop()
+
+    def test_metadata_pick_publish_and_state(self):
+        self.assertEqual(self.client.storage_depth, 7)
+        self.assertTrue(self.client.use_alpha)
+        self.assertEqual(self.client.sort_index, 2)
+        self.assertTrue(self.client.sort_descending)
+        self.assertFalse(self.client.use_split_idx)
+        self.assertEqual(self.client.spec_size, 3)
+        self.assertEqual(self.client.volume, 4.0)
+        self.assertEqual(self.client.all_volume, 8.0)
+        picked = self.client.pick_out_batch(1)
+        self.assertEqual(len(picked), 9)
+        self.client.add(torch.tensor([9]), *picked[2:6])
+        state = self.server.state()
+        self.assertEqual(state.shared.pending_shared_domains, 2)
+        self.assertEqual(state.shared.checked_out_shared_batches, 0)
+
+    def test_worker_failure_with_checkout_fails_actor(self):
+        self.client.pick_out_batch(1)
+        state = self.client.worker_failed("solver crashed")
+        self.assertTrue(state.shared.failed)
+        self.assertIn("solver crashed", state.shared.failure_reason)
 
 
 if __name__ == "__main__":
