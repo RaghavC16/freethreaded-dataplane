@@ -97,7 +97,12 @@ class DomainPacketCodec:
                     raise InvalidObjectError(f"unsupported tensor layout/dtype: {obj.layout}/{obj.dtype}")
                 if obj.ndim > self.limits.max_tensor_rank or obj.numel() > self.limits.max_tensor_elements:
                     raise InvalidObjectError("tensor shape exceeds configured limits")
-                snapshot = obj.detach().to("cpu").contiguous().clone()
+                # A size-1 dimension with stride 0 (an expanded tensor) is
+                # reported as contiguous, so ``contiguous()`` keeps the zero
+                # stride and the byte view below rejects it; force dense
+                # strides computed from the shape instead.
+                snapshot = obj.detach().to("cpu").clone(
+                    memory_format=torch.contiguous_format)
                 # Flatten first: PyTorch cannot change element size while viewing a 0-D tensor.
                 raw_array = snapshot.reshape(-1).view(torch.uint8).numpy()
                 chunk = memoryview(raw_array)
@@ -258,7 +263,9 @@ class DomainPacketCodec:
         raise InvalidObjectError(f"unsupported value type: {type(value).__name__}")
 
     def snapshot(self, value: Any) -> Any:
-        return self.map_tensors(value, lambda t: t.detach().to("cpu").contiguous().clone())
+        return self.map_tensors(
+            value,
+            lambda t: t.detach().to("cpu").clone(memory_format=torch.contiguous_format))
 
 def dataclass_adapter(python_type: type, tag: str) -> TypeAdapter:
     if not dataclasses.is_dataclass(python_type):

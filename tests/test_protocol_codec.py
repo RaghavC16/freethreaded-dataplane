@@ -35,6 +35,17 @@ class ProtocolCodecTests(unittest.TestCase):
         source_tensor.fill_(99)
         self.assertFalse(torch.all(decoded[1].values["tensor"] == 99))
 
+    def test_round_trip_expanded_and_zero_stride_tensors(self):
+        codec = DomainPacketCodec()
+        expanded = torch.tensor(3, dtype=torch.int32).expand(1)
+        broadcast = torch.tensor([[1.5]]).expand(4, 3)
+        self.assertEqual(expanded.stride(), (0,))
+        packet = codec.encode({"expanded": expanded, "broadcast": broadcast})
+        decoded = codec.decode(packet.metadata, b"".join(packet.tensor_bytes))
+        self.assertTrue(torch.equal(decoded["expanded"], expanded))
+        self.assertTrue(torch.equal(decoded["broadcast"], broadcast))
+        self.assertEqual(codec.snapshot(expanded).stride(), (1,))
+
     def test_round_trip_raw_bytes_and_rpc_envelope(self):
         serializer = DomainRpcSerializer(DomainPacketCodec())
         source = {
